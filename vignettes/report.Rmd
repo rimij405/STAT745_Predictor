@@ -1,0 +1,248 @@
+---
+title: "(STAT 745) Individual Project: EDA"
+output: 
+  # Output as a previewable HTML Notebook.
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true
+    highlight: tango
+    fig_caption: true
+    df_print: tibble
+    toc: true
+    toc_depth: 3
+  # Output as an rmarkdown::pdf_document()
+  html_notebook:
+    theme: united
+    highlight: tango
+    df_print: paged
+    toc: true
+    toc_depth: 3
+# pandoc -> pdfLaTeX rendering options:
+fontsize: 11pt
+geometry:
+  - margin=1in
+  - heightrounded
+documentclass: scrartcl
+papersize: a4
+urlcolor: violet
+toccolor: blue
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+# Set the root directory.
+knitr::opts_knit$set(root.dir = here::here(""))
+
+# Set the chunk options.
+knitr::opts_chunk$set(
+    ## ---- Formatting Options ----
+    comment = "",
+    include = TRUE,
+    collapse = TRUE,
+    echo = TRUE,
+    strip.white = TRUE,
+    
+    ## ---- Output Options ----
+    message = TRUE,
+    warning = TRUE,
+    error = TRUE,
+    results = 'markup',
+    
+    ## ---- Display Options ----
+    fig.height = 4,
+    fig.width = 6,
+    rows.print = 15
+)
+```
+
+## Overview
+
+This report will explore the dataset to support the creation of a predictive model.
+
+```{r requirements}
+library(here)
+library(magrittr)
+library(dplyr)
+library(skimr)
+```
+
+## Loading the Data
+
+Load train and test subsets and combine into data frames with a 'Subset' label.
+
+```{r loader-data}
+# Load data subsets.
+load(here("Data.train.RData"))
+load(here("Data.test.RData"))
+
+# Combine subsets.
+Data.df <-
+    dplyr::bind_rows(
+        list(TRAIN = Data.train, 
+             TEST = Data.test),
+        .id = "Subset")
+
+head(Data.df)
+```
+
+## Exploring the Data
+
+Summary of all data points:
+
+```{r summary-total}
+Data.df %>% skim_without_charts() %>% print()
+```
+
+Summary of data grouped by subsets:
+
+```{r summary-subsets}
+Data.df %>% group_by(Subset) %>% skim_without_charts() %>% print()
+```
+
+## Plotting Variables
+
+```{r df-plot}
+Data.plot <- Data.train %>%
+  tidyr::pivot_longer(cols = X1:X140, names_to = "Index", values_to = "Value") %>%
+  print()
+```
+
+
+```{r xy-plot}
+library(ggplot2)
+cols <- c("X1", "X10", "X100")
+p <- ggplot(Data.plot, aes(x = Value, y = Y, alpha = Index)) +
+  geom_point(position = "jitter")
+print(p)
+```
+
+
+## Measuring Association
+
+```{r correlation-matrix}
+set.seed(1234)
+corr.mat <- round(cor(Data.df %>% select(-c(Y, Subset))), 3)
+corr.thresh <- which(abs(corr.mat) > 0.85 & abs(corr.mat) < 1, arr.ind = TRUE)
+print(corr.thresh)
+print(corr.mat[corr.thresh])
+```
+
+```{r correlation-plot}
+digits <- 3
+significance.level <- 0.85
+
+# Get numeric data.
+Data.numeric <- Data.df %>% select(-c(Y, Subset))
+
+# Calculate correlations and drop ones below theshold.
+corr.Data <- round(cor(Data.numeric), digits)
+
+# Drop duplicates and correlations of 1.
+corr.Data[lower.tri(corr.Data, diag = TRUE)] <- NA
+corr.Data[corr.Data == 1] <- NA
+
+# Turn into 3-column table.
+corr.Data %<>% as.table() %>% as.data.frame()
+
+# Select significant values.
+corr.Data <- subset(corr.Data, abs(Freq) > significance.level)
+corr.Data <- corr.Data[order(-abs(corr.Data$Freq)),]
+
+# Omit NA values.
+corr.Data %<>% na.omit()
+print(corr.Data)
+
+# Convert back to matrix.
+corr.Mat <- tidyr::pivot_wider(corr.Data, id_cols = Var1, names_from = Var2, values_from = Freq) %>%
+  data.frame(row.names = 1) %>%
+  as.matrix()
+print(corr.Mat)
+corrplot::corrplot(corr.Mat, is.corr = FALSE, tl.col = "black", na.label = " ")
+```
+
+## Model Baseline
+
+```{r model-anova}
+# Fit linear model.
+lm.1 <- lm(Y ~ ., Data.train)
+
+# Print summary.
+summary(lm.1) %>% print()
+
+# Make predictions.
+lm.1.preds <- predict(lm.1, newdata = Data.train)
+
+# Calculate error.
+residuals.train <- (lm.1.preds - Data.train$Y)
+tibble::tribble(
+  ~Metric, ~Value,
+  "MSE", mean(residuals.train**2),
+  "RMSE", sqrt(mean(residuals.train**2)), 
+  "MAE", mean(abs(residuals.train))
+) %>% print()
+```
+
+```{r preprocess-numerics}
+cols = sprintf("X%d", 1:140)
+
+preprocessor <- caret::preProcess(Data.train %>% select(-Y), method = c("center", "scale"))
+
+X.train <- predict(preprocessor, Data.train %>% select(-Y)) %>%
+  mutate(Y = Data.train$Y)
+X.test <- predict(preprocessor, Data.test)
+
+summary(X.train)
+```
+
+```{r model-lm}
+lm.2 <- lm(Y ~ ., data = X.train)
+print(lm.2)
+
+# Print summary.
+summary(lm.2) %>% print()
+
+# Make predictions.
+lm.2.preds <- predict(lm.2, newdata = X.train)
+
+# Calculate error.
+residuals.train <- (lm.2.preds - X.train$Y)
+tibble::tribble(
+  ~Metric, ~Value,
+  "MSE", mean(residuals.train**2),
+  "RMSE", sqrt(mean(residuals.train**2)), 
+  "MAE", mean(abs(residuals.train))
+) %>% print()
+```
+
+```{r model-rf}
+rf.1 <- randomForest::randomForest(Y ~ ., data = X.train)
+print(rf.1)
+
+# Print summary.
+summary(rf.1) %>% print()
+
+# Make predictions.
+rf.1.preds <- predict(rf.1, newdata = X.train)
+
+# Calculate error.
+residuals.train <- (rf.1.preds - X.train$Y)
+tibble::tribble(
+  ~Metric, ~Value,
+  "MSE", mean(residuals.train**2),
+  "RMSE", sqrt(mean(residuals.train**2)), 
+  "MAE", mean(abs(residuals.train))
+) %>% print()
+```
+
+
+```{r model-rf2}
+randomForest::importance(rf.1)
+randomForest::varImpPlot(rf.1)
+```
+
+```{r xy-plot-features, fig.width=15}
+cols <- c("X23", "X89", "X81", "X61", "X14", "X6", "X131")
+p <- ggplot(Data.plot %>% filter(Index %in% cols), aes(x = Value, y = Y, colour = Index)) +
+  geom_line()
+print(p)
+```
+

@@ -1,0 +1,284 @@
+---
+title: "(STAT 745) Individual Project: EDA 2"
+output: 
+  # Output as a previewable HTML Notebook.
+  html_notebook:
+    theme: united
+    highlight: tango
+    df_print: paged
+    toc: true
+    toc_depth: 3
+  # Output as an rmarkdown::pdf_document()
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true
+    highlight: tango
+    fig_caption: true
+    df_print: tibble
+    toc: true
+    toc_depth: 3
+# pandoc -> pdfLaTeX rendering options:
+fontsize: 11pt
+geometry:
+  - margin=1in
+  - heightrounded
+documentclass: scrartcl
+papersize: a4
+urlcolor: violet
+toccolor: blue
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+# Set the root directory.
+knitr::opts_knit$set(root.dir = here::here(""))
+
+# Set the chunk options.
+knitr::opts_chunk$set(
+    ## ---- Formatting Options ----
+    comment = "",
+    include = TRUE,
+    collapse = TRUE,
+    echo = TRUE,
+    strip.white = TRUE,
+    
+    ## ---- Output Options ----
+    message = TRUE,
+    warning = TRUE,
+    error = TRUE,
+    results = 'markup',
+    
+    ## ---- Display Options ----
+    fig.height = 4,
+    fig.width = 6,
+    rows.print = 15
+)
+```
+
+```{r imports}
+library(tictoc)
+library(stringr)
+library(here)
+library(readr)
+library(dplyr)
+library(HH)
+library(glmnet)
+library(leaps)
+library(tidyr)
+library(ggplot2)
+```
+
+```{r load-data}
+source(here("Effendi.Code.R"))
+Utils$import.data.train(verbose = TRUE)
+Utils$import.data.test(verbose = TRUE)
+```
+
+```{r class-analysis}
+class(Data$Data.test)
+class(Data$Data.train)
+```
+```{r dim-analysis}
+dim(Data$Data.train)
+dim(Data$Data.test)
+```
+
+```{r head-row}
+Data$Data.train[1, 1:6]
+Data$Data.test[1, 1:6]
+```
+
+```{r extents-analysis}
+mat <- apply(Data$Data.train, 2, range)
+p <- ncol(Data$Data.train)
+matplot(2:p, t(mat)[-1,], type="l", main = "Maximum and Minima")
+```
+
+```{r residuals-analysis}
+lm.obj <- lm(Y ~ ., data = Data$Data.train, x = TRUE)
+train.preds <- predict(lm.obj, newdata = Data$Data.train)
+train.mse <- mean((train.preds - Data$Data.train$Y)**2)
+writeLines(str_glue("Training MSE: {round(train.mse, 2)}"))
+par(mfrow=c(2,2))
+plot(lm.obj)
+```
+
+```{r lm-vifs}
+# Reference: https://rdrr.io/cran/HH/man/vif.html
+VIF.lm.cache <- "lm.VIF.rds"
+if(file.exists(here(VIF.lm.cache))) {
+  VIF.lm <- read_rds(VIF.lm.cache)
+  message("Loaded VIFs for linear model from cache.")
+} else {
+  message("Generating VIFs for linear model...")
+  VIF.lm <- vif(lm.obj, y.name = "Y")
+  readr::write_rds(VIF.lm, file = here(VIF.lm.cache))
+  message("Cached VIFs for linear model.")
+}
+plot(VIF.lm, main = "VIFs (lm)")
+```
+
+```{r lm-hat}
+plot(lm.obj$fitted.values, hatvalues(lm.obj), main="Leverage Values (lm)")
+```
+```{r lm-quad}
+Data.quadratic <- Data$Data.train[,-1]^2
+Data.extended <- data.frame(Data$Data.train, Data.quadratic)
+k <- ncol(Data$Data.train)
+names(Data.extended)[(k+1): (2*k-1)] <- paste0("Q", 1:(k-1))
+lm.quad <- lm(Y ~ ., data = Data.extended, x = TRUE)
+train.preds <- predict(lm.quad, newdata = Data.extended)
+train.mse <- mean((train.preds - Data.extended$Y)**2)
+writeLines(str_glue("Training MSE: {round(train.mse, 2)}"))
+par(mfrow=c(2,2))
+plot(lm.quad)
+```
+
+```{r rf-mod}
+rf.mod <- randomForest::randomForest(Y ~ ., data = Data$Data.train)
+train.preds <- predict(rf.mod, newdata = Data$Data.train)
+train.mse <- mean((train.preds - Data$Data.train$Y)**2)
+writeLines(str_glue("Training MSE: {round(train.mse, 2)}"))
+par(mfrow=c(2,2))
+plot(rf.mod)
+```
+```{r lm-quad-prcomp}
+pca.obj <- prcomp(Data.extended)
+pca.vars <- pca.obj$sdev**2
+pca.k <- length(pca.vars)
+pca.var.cum <- cumsum(pca.vars)
+pca.var.perc <- round(pca.vars / pca.var.cum[k], 3)
+writeLines(str_glue("Number of relevant PCs: {k}"))
+writeLines(str_glue("Percent of variability explained: {pca.var.perc}"))
+plot(pca.obj, main = "Scree plot - Variances of PCs")
+```
+
+```{r lm-prcomp}
+pca.obj <- prcomp(Data$Data.train)
+pca.vars <- pca.obj$sdev**2
+pca.k <- length(pca.vars)
+writeLines(str_glue("Number of relevant PCs: {k}"))
+writeLines(str_glue("Variability explained: {pca.vars}"))
+plot(pca.obj, main = "Scree plot - Variances of PCs")
+```
+
+```{r model1}
+# Copy over data.
+Train <- new.env(parent = emptyenv())
+Train$raw <- Data$Data.train
+Test <- new.env(parent = emptyenv())
+Test$raw <- Data$Data.test
+Model <- new.env(parent = emptyenv())
+
+# Fit model with all predictors.
+Model$lm.base <- lm(Y ~ ., data = Train$raw, x = TRUE)
+train.preds <- predict(Model$lm.base, newdata = Train$raw)
+train.mse <- mean((train.preds - Train$raw$Y)**2)
+# print(summary(Model$lm.base))
+writeLines(str_glue("Training MSE (Model$lm.base): {round(train.mse, 2)}"))
+par(mfrow=c(2,2))
+plot(Model$lm.base, main = "Linear Regression (Model$lm.base)")
+plot(Model$lm.base$fitted.values, hatvalues(Model$lm.base), main="Leverage Values (Model$lm.base)")
+
+# Calculate high leverage points.
+large_leverages <- cooks.distance(Model$lm.base) > (4/nrow(Train$raw))
+large_residuals <- rstudent(Model$lm.base) > 3
+Train$clean <- Train$raw[!large_leverages & !large_residuals,]
+
+# Fit model without leverage points.
+Model$lm.clean <- lm(Y ~ ., data = Train$clean, x = TRUE)
+train.preds <- predict(Model$lm.clean, newdata = Train$clean)
+train.mse <- mean((train.preds - Train$clean$Y)**2)
+# print(summary(Model$lm.clean))
+writeLines(str_glue("Training MSE (Model$lm.clean): {round(train.mse, 2)}"))
+par(mfrow=c(2,2))
+plot(Model$lm.clean, main = "Linear Regression (Model$lm.clean)")
+plot(Model$lm.clean$fitted.values, hatvalues(Model$lm.clean), main="Leverage Values (Model$lm.clean)")
+
+# Extend dataset with quadratic features.
+Train$quadratic <- data.frame(Train$clean, Train$clean[,-1]**2)
+Model$lm.quad <- lm(Y ~ ., data = Train$quadratic, x = TRUE)
+train.preds <- predict(Model$lm.quad, newdata = Train$quadratic)
+train.mse <- mean((train.preds - Train$quadratic$Y)**2)
+# print(summary(Model$lm.quad))
+writeLines(str_glue("Training MSE (Model$lm.quad): {round(train.mse, 2)}"))
+par(mfrow=c(2,2))
+plot(Model$lm.quad, main = "Linear Regression (Model$lm.quad)")
+plot(Model$lm.quad$fitted.values, hatvalues(Model$lm.quad), main="Leverage Values (Model$lm.quad)")
+```
+
+
+```{r pca1}
+# PCA on cleaned data.
+Model$pca.clean <- prcomp(Train$clean[,-1], center = TRUE, scale = TRUE)
+summary(Model$pca.clean)
+plot(Model$pca.clean)
+
+# Calculate the training and testing data for cleaned PCA.
+Train$pca <- predict(Model$pca.clean, newdata = Train$clean)
+Train$pca <- data.frame(Y = Train$clean$Y, Train$pca)
+Test$pca <- predict(Model$pca.clean, newdata = Test$raw)
+
+# PCA model.
+Model$lm.pca <- lm(Y ~ PC1 + PC2 + PC3, data = Train$pca)
+train.preds <- predict(Model$lm.pca, newdata = Train$pca)
+train.mse <- mean((train.preds - Train$clean$Y)**2)
+print(summary(Model$lm.pca))
+writeLines(str_glue("Training MSE (Model$lm.pca): {round(train.mse, 2)}"))
+par(mfrow=c(2,2))
+plot(Model$lm.pca, main = "Linear Regression (Model$lm.pca)")
+plot(Model$lm.pca$fitted.values, hatvalues(Model$lm.pca), main="Leverage Values (Model$lm.pca)")
+```
+```{r subsets}
+Model$lm.forward <- regsubsets(Y ~ ., data = Train$clean, nvmax = 100, method = "forward")
+Model$lm.forward.summary <- summary(Model$lm.forward)
+plot(Model$lm.forward.summary$adjr2, apply(Model$lm.forward.summary$which, 1, sum), ylab = "Number of Predictors")
+plot(Model$lm.forward)
+
+# Select best by BIC.
+Model$lm.forward.BIC <- Model$lm.forward.summary$which[which.min(Model$lm.forward.summary$bic),]
+print(Model$lm.forward.BIC)
+print(sprintf("There are %d predictors in the model selected by %s.", sum(Model$lm.forward.BIC), "BIC"))
+
+print(coef(Model$lm.forward, 25))
+```
+
+```{r}
+set.seed(123)
+
+# 10-fold CV
+train.control <- caret::trainControl(method = "cv", number = 10)
+
+# Fit a linear model.
+Model$lm.clean.cv <- caret::train(Y ~ ., data = Train$clean, method = "lm", trControl = train.control)
+
+# Summarise results.
+print(Model$lm.clean.cv)
+
+# Fit a linear model using quadratic features.
+Model$lm.quad.cv <- caret::train(Y ~ ., data = Train$quadratic, method = "lm", trControl = train.control)
+
+# Summarise results.
+print(Model$lm.quad.cv)
+
+# Fit a linear model using pca features.
+Model$lm.pca.cv <- caret::train(Y ~ ., data = Train$pca, method = "lm", trControl = train.control)
+
+# Summarise results.
+print(Model$lm.pca.cv)
+```
+
+
+```{r}
+# 1. Remove outliers based on hatvalues/leverage point analysis.
+
+# 2. Extend dataset by engineering quadratic features.
+
+# 3. Perform best subset regression (regsubsets) to select the n ~ a^p samples. (Slide 232)
+
+# 4. Perform PC Regression based on subset model predictors.
+
+# 5. Profit???
+```
+
+
+
