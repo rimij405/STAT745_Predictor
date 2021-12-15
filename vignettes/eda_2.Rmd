@@ -114,7 +114,7 @@ if(file.exists(here(VIF.lm.cache))) {
   readr::write_rds(VIF.lm, file = here(VIF.lm.cache))
   message("Cached VIFs for linear model.")
 }
-plot(VIF.lm, main = "VIFs (lm)")
+plot(VIF.lm, xlab = "Predictor", ylab = "VIF", main = "VIFs of lm")
 ```
 
 ```{r lm-hat}
@@ -134,13 +134,14 @@ plot(lm.quad)
 ```
 
 ```{r rf-mod}
-rf.mod <- randomForest::randomForest(Y ~ ., data = Data$Data.train)
-train.preds <- predict(rf.mod, newdata = Data$Data.train)
-train.mse <- mean((train.preds - Data$Data.train$Y)**2)
-writeLines(str_glue("Training MSE: {round(train.mse, 2)}"))
-par(mfrow=c(2,2))
-plot(rf.mod)
+# rf.mod <- randomForest::randomForest(Y ~ ., data = Data$Data.train)
+# train.preds <- predict(rf.mod, newdata = Data$Data.train)
+# train.mse <- mean((train.preds - Data$Data.train$Y)**2)
+# writeLines(str_glue("Training MSE: {round(train.mse, 2)}"))
+# par(mfrow=c(2,2))
+# plot(rf.mod)
 ```
+
 ```{r lm-quad-prcomp}
 pca.obj <- prcomp(Data.extended)
 pca.vars <- pca.obj$sdev**2
@@ -191,8 +192,8 @@ train.mse <- mean((train.preds - Train$clean$Y)**2)
 # print(summary(Model$lm.clean))
 writeLines(str_glue("Training MSE (Model$lm.clean): {round(train.mse, 2)}"))
 par(mfrow=c(2,2))
-plot(Model$lm.clean, main = "Linear Regression (Model$lm.clean)")
-plot(Model$lm.clean$fitted.values, hatvalues(Model$lm.clean), main="Leverage Values (Model$lm.clean)")
+plot(Model$lm.clean)
+plot(Model$lm.clean$fitted.values, hatvalues(Model$lm.clean))
 
 # Extend dataset with quadratic features.
 Train$quadratic <- data.frame(Train$clean, Train$clean[,-1]**2)
@@ -202,8 +203,8 @@ train.mse <- mean((train.preds - Train$quadratic$Y)**2)
 # print(summary(Model$lm.quad))
 writeLines(str_glue("Training MSE (Model$lm.quad): {round(train.mse, 2)}"))
 par(mfrow=c(2,2))
-plot(Model$lm.quad, main = "Linear Regression (Model$lm.quad)")
-plot(Model$lm.quad$fitted.values, hatvalues(Model$lm.quad), main="Leverage Values (Model$lm.quad)")
+plot(Model$lm.quad)
+plot(Model$lm.quad$fitted.values, hatvalues(Model$lm.quad))
 ```
 
 
@@ -219,17 +220,19 @@ Train$pca <- data.frame(Y = Train$clean$Y, Train$pca)
 Test$pca <- predict(Model$pca.clean, newdata = Test$raw)
 
 # PCA model.
-Model$lm.pca <- lm(Y ~ PC1 + PC2 + PC3, data = Train$pca)
+form <- as.formula(paste0("Y ~ ", paste0("PC", 1:70, collapse = "+")))
+Model$lm.pca <- lm(form, data = Train$pca)
 train.preds <- predict(Model$lm.pca, newdata = Train$pca)
 train.mse <- mean((train.preds - Train$clean$Y)**2)
 print(summary(Model$lm.pca))
 writeLines(str_glue("Training MSE (Model$lm.pca): {round(train.mse, 2)}"))
 par(mfrow=c(2,2))
-plot(Model$lm.pca, main = "Linear Regression (Model$lm.pca)")
-plot(Model$lm.pca$fitted.values, hatvalues(Model$lm.pca), main="Leverage Values (Model$lm.pca)")
+plot(Model$lm.pca)
+plot(Model$lm.pca$fitted.values, hatvalues(Model$lm.pca))
 ```
-```{r subsets}
-Model$lm.forward <- regsubsets(Y ~ ., data = Train$clean, nvmax = 100, method = "forward")
+
+```{r subsets1}
+Model$lm.forward <- regsubsets(Y ~ ., data = Train$clean, nvmax = 140, method = "forward")
 Model$lm.forward.summary <- summary(Model$lm.forward)
 plot(Model$lm.forward.summary$adjr2, apply(Model$lm.forward.summary$which, 1, sum), ylab = "Number of Predictors")
 plot(Model$lm.forward)
@@ -238,8 +241,53 @@ plot(Model$lm.forward)
 Model$lm.forward.BIC <- Model$lm.forward.summary$which[which.min(Model$lm.forward.summary$bic),]
 print(Model$lm.forward.BIC)
 print(sprintf("There are %d predictors in the model selected by %s.", sum(Model$lm.forward.BIC), "BIC"))
-
 print(coef(Model$lm.forward, 25))
+
+# Calculate MSE errors.
+Train$clean.mat = model.matrix(Y ~ ., data = Train$clean)
+val_errors = rep(NA, 140)
+for(i in 1:140) {
+  coefs = coef(Model$lm.forward, id = i)
+  preds = Train$clean.mat[,names(coefs)] %*% coefs
+  val_errors[i] = mean((Train$clean$Y - preds)**2)
+}
+
+# Select best model with smallest error.
+plot(val_errors)
+points(which.min(val_errors), val_errors[which.min(val_errors)][1], col = "red", cex = 2, pch = 20)
+print(coef(Model$lm.forward, id = which.min(val_errors)))
+train.mse <- val_errors[which.min(val_errors)][1]
+writeLines(str_glue("Training MSE (Model$lm.forward): {round(train.mse, 2)}"))
+```
+
+```{r subsets2}
+Model$quad.forward <- regsubsets(Y ~ ., data = Train$quadratic, nvmax = 200, method = "forward")
+Model$quad.forward.summary <- summary(Model$quad.forward)
+plot(Model$quad.forward.summary$adjr2, apply(Model$quad.forward.summary$which, 1, sum), ylab = "Number of Predictors")
+plot(Model$quad.forward)
+
+# Select best by BIC.
+Model$quad.forward.BIC <- Model$quad.forward.summary$which[which.min(Model$quad.forward.summary$bic),]
+print(Model$quad.forward.BIC)
+print(sprintf("There are %d predictors in the model selected by %s.", sum(Model$quad.forward.BIC), "BIC"))
+
+print(coef(Model$quad.forward, 25))
+
+# Calculate MSE errors.
+Train$quad.mat = model.matrix(Y ~ ., data = Train$quadratic)
+val_errors = rep(NA, 140)
+for(i in 1:140) {
+  coefs = coef(Model$quad.forward, id = i)
+  preds = Train$quad.mat[,names(coefs)] %*% coefs
+  val_errors[i] = mean((Train$quadratic$Y - preds)**2)
+}
+
+# Select best model with smallest error.
+plot(val_errors)
+points(which.min(val_errors), val_errors[which.min(val_errors)][1], col = "red", cex = 2, pch = 20)
+print(coef(Model$quad.forward, id = which.min(val_errors)))
+train.mse <- val_errors[which.min(val_errors)][1]
+writeLines(str_glue("Training MSE (Model$quad.forward): {round(train.mse, 2)}"))
 ```
 
 ```{r}
@@ -266,7 +314,11 @@ Model$lm.pca.cv <- caret::train(Y ~ ., data = Train$pca, method = "lm", trContro
 # Summarise results.
 print(Model$lm.pca.cv)
 ```
-
+```{r extents-analysis2}
+mat <- apply(Train$clean**2, 2, range)
+p <- ncol(Train$clean**2)
+matplot(2:p, t(mat)[-1,], type="l", main = "Maximum and Minima")
+```
 
 ```{r}
 # 1. Remove outliers based on hatvalues/leverage point analysis.

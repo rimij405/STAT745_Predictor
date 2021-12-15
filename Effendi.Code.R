@@ -7,6 +7,9 @@
 
 ## Imports ----
 
+# Delay for RStudio.
+Sys.sleep(1.5)
+
 # Required libraries...
 library(tictoc)
 library(here)
@@ -134,7 +137,7 @@ Utils$export.predictions <- function(.labels = rep(0, times=10),
             output <- c(author, MSE_test, .labels)
 
             # Save as a comma-separated value document.
-            write.table(output, file = output_filepath, row.names = FALSE, col.names = FALSE, sep = ",")
+            write.table(output, file = output_filepath, row.names = FALSE, col.names = FALSE, sep = ",", quote = FALSE)
             message(sprintf("Saved %i prediction(s) to output file '%s'", length(.labels), output_filepath))
         },
         finally = {
@@ -146,10 +149,12 @@ Utils$export.predictions <- function(.labels = rep(0, times=10),
 
 ## Model ----
 
-### Outlier Removal ----
+### Preprocessing ----
 
 # Prepare the preprocess environment.
 Model$prep <- new.env(parent = Model)
+
+#### Outliers ----
 
 #' Calculate outliers and remove them.
 Model$prep$fit_transform <- function(X, y) {
@@ -176,33 +181,22 @@ Model$prep$fit_transform <- function(X, y) {
 
 }
 
-### LASSO Regression ----
+#### Quadratic Features ----
+
+#' Extend existing features.
+Model$prep$transform_features <- function(X) {
+    # Prepare the data.
+    tic("Expanding with quadratic features...", quiet = FALSE)
+    # df.quadratic <- data.frame(X, X**2)
+    df.quadratic <- data.frame(X, X**2)
+    toc(quiet = FALSE)
+    return(df.quadratic)
+}
+
+### Regression ----
 
 # Prepare the regressor environment.
 Model$clf <- new.env(parent = Model)
-
-#' Select the best Lambda for LASSO regression through k-fold cross-validation.
-Model$clf$cv.lambda.min <- function(X_train, y_train, lambdas, k = 5) {
-    tryCatch(
-        expr = {
-            # Begin clock.
-            tic("Selecting best lambda for LASSO through cross-validation.", quiet = FALSE)
-            Utils$log(sprintf("Performing %d-Fold Cross-Validation...", k))
-
-            # Setting alpha = 1 for LASSO.
-            # Select best lambda using regression.
-            cv.lasso <- cv.glmnet(X_train, y_train, alpha = 1, lambda = lambdas, standardize = TRUE, nfolds = k)
-
-            # Select best lasso.
-            lambda.best <- cv.lasso$lambda.min
-        },
-        finally = {
-            # End clock.
-            toc(quiet = FALSE)
-        }
-    )
-    return(lambda.best)
-}
 
 #' Fit the classifier.
 #' @param X_train Training features.
@@ -212,16 +206,11 @@ Model$clf$fit <- function(X_train, y_train) {
     tryCatch(
         expr = {
             # Begin clock.
-            tic("Fitting LASSO regressor on training samples.", quiet = FALSE)
-
-            # Prepare lambdas for LASSO regression.
-            lambdas <- 10^seq(2, -3, by = -.1)
-
-            # Get the best lambda.
-            lambda.best <- Model$clf$cv.lambda.min(X_train, y_train, lambdas = lambdas)
+            tic("Fitting regressor on training samples.", quiet = FALSE)
 
             # Fit model with best lasso.
-            model.fit <- glmnet(X_train, y_train, alpha = 1, lambda = lambda.best, standardize = TRUE)
+            df.train <- data.frame(Y = y_train, X_train)
+            model.fit <- lm(Y ~ ., data = df.train, x = TRUE)
 
             # Print model summary and results.
             print(model.fit)
@@ -233,16 +222,8 @@ Model$clf$fit <- function(X_train, y_train) {
         }
     )
     return(list(
-        fit = model.fit,
-        lambda.best = lambda.best
+        fit = model.fit
     ))
-}
-
-#' Make predictions using the `newdata`.
-#' @param model.fit Fit model to make predictions with.
-Model$clf$predict <- function(model.fit, ...) {
-    model.predictions <- predict(model.fit, ...)
-    return(model.predictions)
 }
 
 #' Fit new model and make predictions for test data.
@@ -251,22 +232,17 @@ Model$clf$predict <- function(model.fit, ...) {
 #' @param X_test Testing features.
 #' @return List containing training and test predictions.
 Model$clf$fit_predict <- function(X_train, y_train, X_test) {
-    # Convert data to matrices.
-    X_train <- as.matrix(X_train)
-    X_test <- as.matrix(X_test)
-
     # Fit the model.
     model.obj <- Model$clf$fit(X_train, y_train)
 
     # Make predictions.
-    predictions.train <- Model$clf$predict(model.obj$fit, s = model.obj$lambda.best, newx = X_train)
-    predictions.test <- Model$clf$predict(model.obj$fit, s = model.obj$lambda.best, newx = X_test)
+    predictions.train <- predict(model.obj$fit, newdata = X_train)
+    predictions.test <- predict(model.obj$fit, newdata = X_test)
 
     # Return results.
     return(list(
         train.preds = predictions.train,
-        test.preds = predictions.test,
-        lambda.best = model.obj$lambda.best
+        test.preds = predictions.test
     ))
 }
 
@@ -315,6 +291,12 @@ main <- function(verbose = FALSE) {
             y_train <- Xy_train %>% pull(Y)
             toc(quiet = !verbose)
 
+            # Extract quadratic features.
+            tic("Extraction of quadratic features.", quiet = !verbose)
+            X_train <- Model$prep$transform_features(X_train)
+            X_test <- Model$prep$transform_features(X_test)
+            toc(quiet = !verbose)
+
             # Fit model and make predictions.
             results <- Model$clf$fit_predict(X_train, y_train, X_test)
             y_test <- results$test.preds
@@ -322,9 +304,6 @@ main <- function(verbose = FALSE) {
             # Calculate the training errors
             # and estimate the testing error.
             tic("Estimating test error.", quiet = !verbose)
-
-            print(sprintf("Best lambda = %.4f", results$lambda.best))
-            print(sprintf("Average response = %.4f", mean(results$train.preds)))
 
             Error.train <- Model$clf$metrics(y_train, results$train.preds)
             MSE_test <- Error.train %>%
